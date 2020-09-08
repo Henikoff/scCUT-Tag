@@ -17,7 +17,7 @@ Single-cell analysis has become a powerful approach for the molecular characteri
 Cell lines: 
 https://sfurlan.com/cell_lines/sc_fragfiles/K27me3_h1de.fragments.tsv.gz 
 https://sfurlan.com/cell_lines/sc_fragfiles/K27me3_stdcells.fragments.tsv.gz
-ftp://sf%2540sfurlan.com@ftp.sfurlan.com/cell_lines/sc_fragfiles/K4me2_stdcells.fragments.tsv.gz
+https://sfurlan.com/cell_lines/sc_fragfiles/K4me2_stdcells.fragments.tsv.gz
 
 PBMC: 
 https://sfurlan.com/pbmc/fragments.tsv.gz
