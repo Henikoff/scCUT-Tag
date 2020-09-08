@@ -1,0 +1,513 @@
+---
+title: "PBMC ArchR"
+author: "SNF"
+date: "9-8-20"
+output:
+  prettydoc::html_pretty:
+    theme: architect
+    highlight: github
+editor_options: 
+  chunk_output_type: console
+---
+
+
+
+
+```{r, warning=FALSE, message=FALSE, warning=FALSE, echo=F}
+# devtools::install_github('scfurl/m3addon')
+# devtools::install_github('scfurl/ArchR')
+# library(ArchR)
+# ArchR::installExtraPackages()
+# devtools::install_github("GreenleafLab/ArchR", ref="master", repos = BiocManager::repositories())
+graphics.off()
+rm(list=ls())
+knitr::opts_chunk$set(fig.width=8, fig.height=6,
+                      echo=FALSE, warning=FALSE, message=FALSE)
+knitr::opts_chunk$set(dev.args=list(bg="transparent"))
+
+suppressPackageStartupMessages({
+  library(ArchR)
+  library(dplyr)
+  library(Matrix)
+  library(ggplot2)
+  library(rhdf5)
+  library(pals)
+  library(m3addon)
+  library(monocle3)
+  library(ShortRead)
+  library(Biostrings)     # Provides DNAString, DNAStringSet, etc
+  library(BSgenome)       # Provides getSeq()
+  library(GenomicRanges)  # Provides GRanges, etc
+  library(rtracklayer)    # Provides import() and export()
+
+})
+hg38<-getBSgenome("BSgenome.Hsapiens.UCSC.hg38" )
+
+xfun::pkg_load2(c('base64enc', 'htmltools', 'mime'))
+
+SFtheme<-theme_bw(base_size=14) + 
+  theme(panel.background = element_rect(fill = "transparent",colour = NA), # or theme_blank()
+    panel.grid.minor = element_blank(), 
+    panel.grid.major = element_blank(),
+    legend.background = element_rect(fill = "transparent"),
+    legend.box.background = element_rect(fill = "transparent"), 
+    legend.key = element_rect(fill = "transparent", colour = NA),
+    plot.background = element_rect(fill = "transparent",colour = NA))
+theme_set(SFtheme)
+
+```
+
+
+
+
+
+
+
+# H3K27Me3 600_20k No doublet removal BioRXivDraft 9-01-20
+
+```{r H4K27Me3}
+#set dirs
+#WDIR<-file.path("/Users/sjwu/Fred Hutchinson Cancer Research Center/scCut&Tag - pbmc")
+# WDIR<-file.path("/Volumes/data/Fred Hutchinson Cancer Research Center/scCut&Tag - General/Manuscript/reproducibility/SNF - pbmc")
+WDIR<-file.path("/Users/sfurlan/Fred Hutchinson Cancer Research Center/scCut&Tag - General/Manuscript/reproducibility/SNF - pbmc")
+setwd(WDIR)
+RDIR<-"/Users/sfurlan/Fred Hutchinson Cancer Research Center/scCut&Tag - General/Manuscript/code_repo/pbmc"
+#RDIR<-"/Users/sfurlan/Fred Hutchinson Cancer Research Center/scCut&Tag - Manuscript/code_repo/pbmc"
+#RDIR<-"/Volumes/data/Fred Hutchinson Cancer Research Center/scCut&Tag - General/Manuscript/code_repo/pbmc"
+
+mark<-"K27Me3"
+projID<-"K27Me3_600_20k"
+addArchRThreads(threads = 6)
+addArchRGenome("hg38")
+cols<-pals::glasbey()[-c(4,6)]
+
+#cellranger Qc and get frag lengths
+sc<-data.table::fread(file.path(RDIR, "singlecell.csv"))[-1,]
+ff<-data.table::fread(file.path(RDIR, "fragments.tsv.gz"))
+colnames(ff)<-c("seq", "start", "end", "cb", "pcr_count")
+
+scsorted<-sc[order(-sc$passed_filters),]
+scsorted$UMICounts<-log10(scsorted$passed_filters)
+scsorted$Barcodes<-log10(as.numeric(rownames(scsorted)))
+ggplot(subset(scsorted, passed_filters>10),aes(y=UMICounts, x=Barcodes))+geom_point()
+```
+
+
+#create cell arrows
+```{r}
+ArrowFiles <- createArrowFiles(outputNames = projID,
+  inputFiles = file.path(RDIR, "fragments.tsv.gz"),
+  sampleNames = mark, validBarcodes = sc$barcode,
+  filterTSS = 0, #Dont set this too high because you can always increase later
+  filterFrags = 600,
+    minFrags = 600,
+    maxFrags = 20e3,
+  addTileMat = TRUE, 
+  addGeneScoreMat = TRUE,
+  TileMatParams = list(tileSize=5000), force=T
+)
+
+
+ArrowFiles<-paste0(projID, ".arrow")
+
+
+#make proj for cells and ED
+proj <- ArchRProject(
+ArrowFiles = ArrowFiles,
+outputDirectory = file.path(WDIR, projID),
+copyArrows = TRUE) #This is recommened so that if you modify the Arrow files you have an original copy for later usage.
+
+
+#filter doublets for cells
+proj <- addDoubletScores(
+input = proj,
+k = 10, #Refers to how many cells near a "pseudo-doublet" to count.
+knnMethod = "UMAP", )
+
+# saveArchRProject(proj, outputDirectory = file.path(WDIR, paste0(projID, "_preFilter")))
+# 
+# 
+ proj <- loadArchRProject(path = file.path(WDIR, paste0(projID, "_preFilter")))
+
+#cluster cells
+proj <- addIterativeLSI(ArchRProj = proj, iterations = 2, LSIMethod = 2, force=T)
+proj <- addUMAP(ArchRProj = proj, reducedDims = "IterativeLSI", minDist = 0.1, force = T)
+proj <- addClusters(input = proj, reducedDims = "IterativeLSI", force=T, resolution=0.8)
+#check for NA cells and fix
+# which(is.na(proj@cellColData$Clusters))
+# proj@cellColData$Clusters[which(is.na(proj@cellColData$Clusters))]<-"C4"
+#check embedding and clusters
+graphics.off()
+p1 <- plotEmbedding(ArchRProj = proj, colorBy = "cellColData", name = "Clusters", embedding = "UMAP", rastr = F, labelMeans=F)
+p1+scale_color_manual(values=cols)
+
+
+
+#Qc stuff
+tb<-sc[match(strsplit(rownames(proj), "#") %>% sapply("[[", 2), sc$barcode),]
+proj@cellColData<-cbind(proj@cellColData, tb)
+proj@cellColData$logFrag<-log10(proj@cellColData$nFrags)
+proj@cellColData$percentDup<-proj@cellColData$duplicate/proj@cellColData$total
+
+#save cells and ED
+saveArchRProject(proj, outputDirectory = file.path(WDIR, projID), overwrite = T)
+
+proj<-loadArchRProject(path = file.path(WDIR, projID),)
+
+############################QC PLOTTING########################################
+
+proj@cellColData$Cluster<-factor(proj@cellColData$Clusters, levels=paste0("C", 1:length(table(proj@cellColData$Clusters))))
+p1 <- plotEmbedding(ArchRProj = proj, colorBy = "cellColData", name = "Clusters", embedding = "UMAP", rastr = F, labelMeans=F)
+graphics.off()
+p1+scale_color_manual(values=cols)
+p1 <- plotEmbedding(ArchRProj = proj, colorBy = "cellColData", name = "logFrag", embedding = "UMAP", rastr = F, labelMeans=F)
+p1
+p1 <- plotEmbedding(ArchRProj = proj, colorBy = "cellColData", name = "NucleosomeRatio", embedding = "UMAP", rastr = F, labelMeans=F)
+p1+scale_color_manual(values=cols)
+
+proj@cellColData$Cluster<-as.character(proj@cellColData$Clusters)
+proj@cellColData$Cluster<-factor(proj@cellColData$Cluster, levels=paste0("C", 1:length(table(proj@cellColData$Clusters))))
+proj@cellColData$ClustCat<-as.character(proj@cellColData$Cluster)
+# get fragments and look at length
+frags<-getFragmentsFromArrow(ArrowFile = getArrowFiles(proj))
+fragDF<-DataFrame(cell=as.character(frags$RG), 
+                  Cluster=proj@cellColData$Cluster[as.numeric(match(as.character(frags$RG), rownames(proj@cellColData)))],
+          length=frags@ranges@width)
+cellfragDF<-fragDF[!is.na(fragDF$Cluster),]
+library(ggridges)
+pdf("SuppFig1b.pdf")
+ggplot(subset(as.data.frame(cellfragDF), length<750), aes(x=length, y=Cluster, fill=Cluster)) +
+  geom_density_ridges()+scale_fill_manual(values=cols)
+dev.off()
+pdf("SuppFig1b-top.pdf")
+ggplot(subset(as.data.frame(cellfragDF), length<750), aes(x=length, y=Clusters, fill=Clusters)) +
+  p1+scale_color_manual(values=cols)
+dev.off()
+
+
+satellite<-c("C13", "C14", "C15")
+doublet<-c("C9", "C4")
+toosmall<-c("C11", "C12")
+proj@cellColData$ClustCat[proj@cellColData$ClustCat %in% toosmall]<-"Too_small"
+proj@cellColData$ClustCat[proj@cellColData$ClustCat %in% satellite]<-"Satellite"
+#proj@cellColData$ClustCat[!proj@cellColData$ClustCat %in% c(satellite, highfrag)]<-"Other"
+proj@cellColData$ClustCat[proj@cellColData$ClustCat %in% c(doublet)]<-"Doublet"
+proj@cellColData$ClustCat[!proj@cellColData$ClustCat %in% c("Satellite", "Doublet", "Too_small")]<-"Ok"
+proj@cellColData$ClustCat<-factor(proj@cellColData$ClustCat)
+
+
+proj@cellColData$Cluster<-as.character(proj@cellColData$Clusters)
+proj@cellColData$Cluster<-factor(proj@cellColData$Cluster, levels=paste0("C", 1:length(table(proj@cellColData$Clusters))))
+proj@cellColData$ClustCat2<-as.character(proj@cellColData$Cluster)
+satellite<-c("C13", "C14", "C15")
+doublet<-c("C9", "C4")
+proj@cellColData$ClustCat2[proj@cellColData$ClustCat2 %in% satellite]<-"ATAC_fragment_dist."
+#proj@cellColData$ClustCat[!proj@cellColData$ClustCat %in% c(satellite, highfrag)]<-"Other"
+proj@cellColData$ClustCat2[proj@cellColData$ClustCat2 %in% c(doublet)]<-"Doublet"
+proj@cellColData$ClustCat2[!proj@cellColData$ClustCat2 %in% c("ATAC_fragment_dist.", "Doublet")]<-"Ok"
+proj@cellColData$ClustCat2<-factor(proj@cellColData$ClustCat2)
+ggplot(data.frame(proj@cellColData), aes(x=logFrag, y=PromoterRatio,  color=Cluster))+geom_point(size=0.9)+scale_color_manual(values=cols)+facet_wrap(~ClustCat2)
+#plotTSSEnrichment(proj)
+ggplot(data.frame(proj@cellColData), aes(x=logFrag, y=BlacklistRatio,  color=Cluster))+geom_point(size=0.9)+scale_color_manual(values=cols)
+ggplot(data.frame(proj@cellColData), aes(x=logFrag, y=DoubletScore,  color=Cluster))+geom_point(size=0.9)+scale_color_manual(values=cols)
+ggplot(data.frame(proj@cellColData), aes(x=logFrag, y=NucleosomeRatio,  color=Cluster))+geom_point(size=0.9)+scale_color_manual(values=cols)
+ggplot(data.frame(proj@cellColData), aes(x=logFrag, y=nMultiFrags,  color=Cluster))+geom_point(size=0.9)+scale_color_manual(values=cols)+facet_wrap(~ClustCat2)
+ggplot(data.frame(proj@cellColData), aes(x=logFrag, y=nMonoFrags,  color=Cluster))+geom_point(size=0.9)+scale_color_manual(values=cols)+facet_wrap(~ClustCat2)
+pdf("BioRXiv_SuppTSS.pdf")
+ggplot(data.frame(proj@cellColData), aes(x=logFrag, y=TSSEnrichment,  color=Cluster))+geom_point(size=0.9)+scale_color_manual(values=cols)+facet_wrap(~ClustCat2)
+dev.off()
+ggplot(data.frame(proj@cellColData), aes(x=logFrag, y=enhancer_region_fragments,  color=Cluster))+geom_point(size=0.9)+scale_color_manual(values=cols)+facet_wrap(~ClustCat)
+
+ggplot(data.frame(proj@cellColData), aes(x=logFrag, y=percentDup,  color=Cluster))+geom_point(size=0.9)+scale_color_manual(values=cols)+facet_wrap(~ClustCat)
+p1+scale_color_manual(values=glasbey())
+
+table(proj@cellColData$Clusters)
+
+#######SUBSET OUT DOUBLETS AND SATELLITES###########
+projS<-proj[proj@cellColData$ClustCat=="Ok"]
+projS <- addIterativeLSI(ArchRProj = projS, iterations = 2, LSIMethod = 2, force=T)
+projS <- addUMAP(ArchRProj = projS, reducedDims = "IterativeLSI", minDist = 0.1, force = T)
+projS <- addClusters(input = projS, reducedDims = "IterativeLSI", force=T, resolution=1)
+p1 <- plotEmbedding(ArchRProj = projS, colorBy = "cellColData", name = "Clusters", embedding = "UMAP", rastr = F, labelMeans=F)
+graphics.off()
+p1+scale_color_manual(values=cols)
+p1 <- plotEmbedding(ArchRProj = projS, colorBy = "cellColData", name = "logFrag", embedding = "UMAP", rastr = F, labelMeans=F)
+p1
+p1 <- plotEmbedding(ArchRProj = projS, colorBy = "cellColData", name = "NucleosomeRatio", embedding = "UMAP", rastr = F, labelMeans=F)
+p1+scale_color_manual(values=cols)
+
+
+projS@cellColData$Cluster<-as.character(projS@cellColData$Clusters)
+projS@cellColData$Cluster<-factor(projS@cellColData$Cluster, levels=paste0("C", 1:length(table(projS@cellColData$Clusters))))
+projS@cellColData$ClustCat<-as.character(projS@cellColData$Cluster)
+sink<-c("C1", "C2")
+projS@cellColData$ClustCat[projS@cellColData$ClustCat %in% sink]<-"Sink"
+#projS@cellColData$ClustCat[!projS@cellColData$ClustCat %in% c(satellite, highfrag)]<-"Other"
+projS@cellColData$ClustCat[!projS@cellColData$ClustCat %in% c("Sink")]<-"Ok"
+projS@cellColData$ClustCat<-factor(projS@cellColData$ClustCat)
+ggplot(data.frame(projS@cellColData), aes(x=logFrag, y=PromoterRatio,  color=Cluster))+geom_point(size=0.9)+scale_color_manual(values=cols)+facet_wrap(~ClustCat)
+#plotTSSEnrichment(projS)
+ggplot(data.frame(projS@cellColData), aes(x=logFrag, y=BlacklistRatio,  color=Cluster))+geom_point(size=0.9)+scale_color_manual(values=cols)
+ggplot(data.frame(projS@cellColData), aes(x=logFrag, y=DoubletScore,  color=Cluster))+geom_point(size=0.9)+scale_color_manual(values=cols)
+ggplot(data.frame(projS@cellColData), aes(x=logFrag, y=NucleosomeRatio,  color=Cluster))+geom_point(size=0.9)+scale_color_manual(values=cols)
+ggplot(data.frame(projS@cellColData), aes(x=logFrag, y=nMultiFrags,  color=Cluster))+geom_point(size=0.9)+scale_color_manual(values=cols)+facet_wrap(~ClustCat)
+ggplot(data.frame(projS@cellColData), aes(x=logFrag, y=nMonoFrags,  color=Cluster))+geom_point(size=0.9)+scale_color_manual(values=cols)+facet_wrap(~ClustCat)
+
+ggplot(data.frame(projS@cellColData), aes(x=logFrag, y=TSSEnrichment,  color=Cluster))+geom_point(size=0.9)+scale_color_manual(values=cols)+facet_wrap(~ClustCat)
+ggplot(data.frame(projS@cellColData), aes(x=logFrag, y=enhancer_region_fragments,  color=Cluster))+geom_point(size=0.9)+scale_color_manual(values=cols)+facet_wrap(~ClustCat)
+
+ggplot(data.frame(projS@cellColData), aes(x=logFrag, y=percentDup,  color=Cluster))+geom_point(size=0.9)+scale_color_manual(values=cols)+facet_wrap(~ClustCat)
+p1+scale_color_manual(values=glasbey())
+
+table(projS@cellColData$Clusters)
+
+
+############################MARKERS########################################
+p1 <- plotEmbedding(ArchRProj = projS, colorBy = "cellColData", name = "Clusters", embedding = "UMAP", rastr = F, labelMeans=F)
+p1+scale_color_manual(values=cols)
+markersGS <- getMarkerFeatures(
+    ArchRProj = projS, 
+    useMatrix = "GeneScoreMatrix", testMethod = "wilcoxon", normBy = "logFrag",
+    groupBy = "Clusters")
+
+library(ComplexHeatmap)
+heatmapGSu <- plotMarkerHeatmap(  seMarker = markersGS, 
+  cutOff = "FDR <= 0.05 & Log2FC >= 2", 
+  transpose = TRUE)
+heatmapGSu 
+
+
+heatmapGSneg <- plotMarkerHeatmap(pal = colorRampPalette(colors = c("black",  "orange", "red", "red"))(100),
+  seMarker = markersGS, 
+  cutOff = "FDR <= 0.05 & Log2FC <= -2", 
+  transpose = TRUE, returnMat = F,
+)
+heatmapGSneg
+
+markerList <- getMarkers(markersGS, cutOff = "FDR <= 0.01 & Log2FC >= 3")
+sapply(markerList, nrow)
+markerList <- getMarkers(markersGS, cutOff = "FDR <= 0.01 & Log2FC <= -3")
+sapply(markerList, nrow)
+
+
+#######SUBSET OUT C1 and C2 because no genewide enrichment###########
+projS2<-projS[!projS@cellColData$Clusters %in% c("C1", "C2")]
+projS2 <- addIterativeLSI(ArchRProj = projS2, iterations = 2, LSIMethod = 2, force=T)
+projS2 <- addUMAP(ArchRProj = projS2, reducedDims = "IterativeLSI", minDist = 0.1, force = T)
+projS2 <- addClusters(input = projS2, reducedDims = "IterativeLSI", force=T, resolution=2)
+p1 <- plotEmbedding(ArchRProj = projS2, colorBy = "cellColData", name = "Clusters", embedding = "UMAP", rastr = F, labelMeans=F)
+graphics.off()
+p1+scale_color_manual(values=cols)
+
+
+
+
+projS2@cellColData$Cluster<-as.character(projS2@cellColData$Clusters)
+projS2@cellColData$Cluster<-factor(projS2@cellColData$Cluster, levels=paste0("C", 1:length(table(projS2@cellColData$Clusters))))
+projS2@cellColData$ClustCat<-as.character(projS2@cellColData$Cluster)
+sink<-c("C12")
+projS2@cellColData$ClustCat[projS2@cellColData$ClustCat %in% sink]<-"Sink"
+#projS2@cellColData$ClustCat[!projS2@cellColData$ClustCat %in% c(satellite, highfrag)]<-"Other"
+projS2@cellColData$ClustCat[!projS2@cellColData$ClustCat %in% c("Sink")]<-"Ok"
+projS2@cellColData$ClustCat<-factor(projS2@cellColData$ClustCat)
+ggplot(data.frame(projS2@cellColData), aes(x=logFrag, y=PromoterRatio,  color=Cluster))+geom_point(size=0.9)+scale_color_manual(values=cols)+facet_wrap(~ClustCat)
+#plotTSSEnrichment(projS2)
+ggplot(data.frame(projS2@cellColData), aes(x=logFrag, y=BlacklistRatio,  color=Cluster))+geom_point(size=0.9)+scale_color_manual(values=cols)
+ggplot(data.frame(projS2@cellColData), aes(x=logFrag, y=DoubletScore,  color=Cluster))+geom_point(size=0.9)+scale_color_manual(values=cols)
+ggplot(data.frame(projS2@cellColData), aes(x=logFrag, y=NucleosomeRatio,  color=Cluster))+geom_point(size=0.9)+scale_color_manual(values=cols)
+ggplot(data.frame(projS2@cellColData), aes(x=logFrag, y=nMultiFrags,  color=Cluster))+geom_point(size=0.9)+scale_color_manual(values=cols)+facet_wrap(~ClustCat)
+ggplot(data.frame(projS2@cellColData), aes(x=logFrag, y=nMonoFrags,  color=Cluster))+geom_point(size=0.9)+scale_color_manual(values=cols)+facet_wrap(~ClustCat)
+
+ggplot(data.frame(projS2@cellColData), aes(x=logFrag, y=TSSEnrichment,  color=Cluster))+geom_point(size=0.9)+scale_color_manual(values=cols)+facet_wrap(~ClustCat)
+ggplot(data.frame(projS2@cellColData), aes(x=logFrag, y=enhancer_region_fragments,  color=Cluster))+geom_point(size=0.9)+scale_color_manual(values=cols)+facet_wrap(~ClustCat)
+
+ggplot(data.frame(projS2@cellColData), aes(x=logFrag, y=percentDup,  color=Cluster))+geom_point(size=0.9)+scale_color_manual(values=cols)+facet_wrap(~ClustCat)
+p1+scale_color_manual(values=cols)
+
+table(projS2@cellColData$Clusters)
+projS2@cellColData$MClusters<-projS2@cellColData$Clusters
+projS2@cellColData$MClusters[projS2@cellColData$MClusters %in% paste0("C", 1:9)]<-"C1"
+
+############################MARKERS########################################
+p1 <- plotEmbedding(ArchRProj = projS2, colorBy = "cellColData", name = "MClusters", embedding = "UMAP", rastr = F, labelMeans=F)
+graphics.off()
+p1+scale_color_manual(values=cols)
+markersGS <- getMarkerFeatures(
+    ArchRProj = projS2, 
+    useMatrix = "GeneScoreMatrix", testMethod = "wilcoxon", normBy = "logFrag",
+    groupBy = "MClusters")
+
+library(ComplexHeatmap)
+heatmapGSu <- plotMarkerHeatmap(  seMarker = markersGS,
+  cutOff = "FDR <= 0.05 & Log2FC >= 2", 
+  transpose = TRUE)
+heatmapGSu 
+
+
+heatmapGSneg <- plotMarkerHeatmap(pal = colorRampPalette(colors = c("black",  "orange", "red", "red"))(100),
+  seMarker = markersGS,
+  cutOff = "FDR <= 0.05 & Log2FC <= -2", 
+  transpose = TRUE, returnMat = F,
+)
+heatmapGSneg
+
+markerList <- getMarkers(markersGS, cutOff = "FDR <= 0.01 & Log2FC >= 3")
+sapply(markerList, nrow)
+markerList <- getMarkers(markersGS, cutOff = "FDR <= 0.01 & Log2FC <= -3")
+sapply(markerList, nrow)
+
+
+
+#######SUBSET OUT C12 as has no genewide enrichment###########
+projS3<-projS2[!projS2@cellColData$Clusters %in% c("C12")]
+projS3 <- addIterativeLSI(ArchRProj = projS3, iterations = 2, LSIMethod = 2, force=T)
+projS3 <- addUMAP(ArchRProj = projS3, reducedDims = "IterativeLSI", minDist = 0.1, force = T)
+projS3 <- addClusters(input = projS3, reducedDims = "IterativeLSI", force=T, resolution=1.2)
+p1 <- plotEmbedding(ArchRProj = projS3, colorBy = "cellColData", name = "Clusters", embedding = "UMAP", rastr = F, labelMeans=F)
+graphics.off()
+p1+scale_color_manual(values=cols)
+p1 <- plotEmbedding(ArchRProj = projS3, colorBy = "cellColData", name = "logFrag", embedding = "UMAP", rastr = F, labelMeans=F)
+p1
+
+p1 <- plotEmbedding(ArchRProj = projS3, colorBy = "cellColData", name = "DoubletScore", embedding = "UMAP", rastr = F, labelMeans=F)
+p1
+p1 <- plotEmbedding(ArchRProj = projS3, colorBy = "cellColData", name = "NucleosomeRatio", embedding = "UMAP", rastr = F, labelMeans=F)
+p1+scale_color_manual(values=cols)
+
+
+############################PROJECTION########################################
+
+p1 <- plotEmbedding(ArchRProj = projS3, colorBy = "cellColData", name = "Clusters", embedding = "UMAP", rastr = F, labelMeans=F)
+graphics.off()
+p1+scale_color_manual(values=cols)
+seCHIP<-readRDS(file.path(RDIR, "H3K27me3_encode_blood_5000_used.RDS"))
+
+#take out Tregs
+projection<-projectBulkATAC(
+  ArchRProj = projS3,
+  seATAC = seCHIP,
+  reducedDims = "IterativeLSI",
+  embedding = "UMAP",
+  n = 100, 
+  verbose = TRUE,
+  threads = getArchRThreads(),
+  logFile = createLogFile("projectBulkATAC")
+)
+
+#colData(seCHIP)
+p<-as.data.frame(do.call(rbind, projection[2:1]))
+cdata<-colData(seCHIP)[match(p$Type, basename(seCHIP$file)),]
+cd<-apply(cdata, 1, function(v) v[is.na(v)]<-"scCutTag")
+rownames(cdata)<-rownames(p)
+p<-cbind(p, cdata)
+pdf("BioRXiv1a-Right.pdf")
+ggplot(p, aes(x=UMAP1, y=UMAP2, color=quick))+geom_point(size=0.4)+scale_color_manual(values=cols[c(5,16,12,1,2)], na.value="gray")+ guides(colour = guide_legend(override.aes = list(size=5)))
+dev.off()
+
+############################MARKERS########################################
+projS3@cellColData$Clusters[projS3@cellColData$Clusters %in% c("C1", "C2", "C3", "C4")]<-"C4"
+projS3@cellColData$Clusters<-as.numeric(gsub("C", "", projS3@cellColData$Clusters))-3
+projS3@cellColData$Clusters<-paste0("C", projS3@cellColData$Clusters)
+p1 <- plotEmbedding(ArchRProj = projS3, colorBy = "cellColData", name = "Clusters", embedding = "UMAP", rastr = F, labelMeans=F)
+
+pdf(file = file.path("BioRXivFig1a.pdf"))
+p1+scale_color_manual(values=cols)
+dev.off()
+
+markersGS <- getMarkerFeatures(
+    ArchRProj = projS3, 
+    useMatrix = "GeneScoreMatrix", testMethod = "wilcoxon", normBy = "logFrag",
+    groupBy = "Clusters")
+markerGenesd  <- c( "PAX5", "LEF1",  "KLRC3", "IRAK3", "CEBPA", "FLT3", "CD163")
+markerGenesu  <- c("CD8A", "PAX5", "LEF1",  "KLRC3", "IRAK3", "CEBPA", "FLT3", "CD163")
+
+heatmapGSu <- plotMarkerHeatmap(
+  seMarker = markersGS, labelMarkers=markerGenesu,
+  cutOff = "FDR <= 0.05 & Log2FC >= 2", 
+  transpose = TRUE, returnMat = F,
+)
+pdf(file = file.path("BioRXivFig1d.pdf"))
+heatmapGSu
+dev.off()
+
+
+heatmapGSneg <- plotMarkerHeatmap(pal = colorRampPalette(colors = c("black",  "black", "orange", "red", "red"))(100),
+  seMarker = markersGS, labelMarkers=markerGenesd,
+  cutOff = "FDR <= 0.05 & Log2FC <= -2", 
+  transpose = TRUE, returnMat = F,
+)
+heatmapGSneg
+    pdf(file = file.path("BioRXivFig1b.pdf"))
+heatmapGSneg
+dev.off()
+
+markerList <- getMarkers(markersGS, cutOff = "FDR <= 0.01 & Log2FC >= 3")
+sapply(markerList, nrow)
+markerList <- getMarkers(markersGS, cutOff = "FDR <= 0.01 & Log2FC <= -3")
+sapply(markerList, nrow)
+
+
+
+
+# add group coverages, call peaks and get marker enrichment on cells
+projS3<-addGroupCoverages(projS3, groupBy = "Clusters", force = T)
+projS3<-addReproduciblePeakSet(projS3, groupBy = "Clusters", force = T)
+projS3 <- addPeakMatrix(projS3)
+
+#saveArchRProject(ArchRProj = projS3, outputDirectory = file.path(WDIR, "PBMC_BestClustering"))
+
+projS3<-loadArchRProject(file.path(WDIR, "PBMC_BestClustering"))
+
+p <- plotEmbedding(
+    ArchRProj = projS3, 
+    colorBy = "GeneScoreMatrix",  
+    name = gene, 
+    embedding = "UMAP",
+    quantCut = c(0.01, 0.95)
+)
+p
+
+b <- plotBrowserTrack(
+    ArchRProj = projS3, 
+    groupBy = "Clusters", normMethod = "ncells",
+    geneSymbol = gene, 
+    upstream = 100000,
+    downstream = 200000, 
+)
+plot(b[[1]])
+
+ArchR:::.groupRegionSumArrows
+library(ComplexHeatmap)
+
+heatmapGS <- plotMarkerHeatmap(
+  seMarker = markersGS, labelMarkers=markerGenes,
+  cutOff = "FDR <= 0.01 & Log2FC >= 2", 
+  transpose = TRUE, returnMat = F,
+)
+heatmapGS
+
+heatmapGSneg <- plotMarkerHeatmap(pal = colorRampPalette(colors = c("black",  "orange", "red", "red"))(100),
+  seMarker = markersGS, labelMarkers=markerGenes,
+  cutOff = "FDR <= 0.01 & Log2FC <= -2", 
+  transpose = TRUE, returnMat = F,
+)
+heatmapGSneg
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
+### Appendix
+```{r Appendix,echo=FALSE}
+sessionInfo()
+getwd()
+```
