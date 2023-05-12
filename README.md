@@ -22,7 +22,7 @@ https://sfurlan.com/cell_lines/sc_fragfiles/K4me2_stdcells.fragments.tsv.gz
 
 PBMC: 
 https://sfurlan.com/pbmc/fragments.tsv.gz (fragments)
-https://sfurlan.com/pbmc/meta.csv (metadata)
+https://sfurlan.com/pbmc/meta.csv (cell metadata - called 'singlecell.csv' in the script)
 
 GBM: 
 https://sfurlan.com/gbm/UW7R_raw_data/fragments.tsv.gz
